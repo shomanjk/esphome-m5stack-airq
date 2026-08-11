@@ -8,3 +8,5 @@ Suggested files (referenced from the root README):
 | `device.jpg` | Optional wider shot of the AirQ hardware |
 
 Tips: straight-on to the panel, even lighting, after warm-up so sensors and the battery gauge are visible. JPG or PNG both work; keep under ~2 MB if possible.
+
+Redact any Wi‑Fi SSID or other identifying network names before committing.

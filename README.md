@@ -8,7 +8,7 @@ This example goes beyond a USB-only plug-and-flash config: it latches the batter
 
 ![M5Stack AirQ e-ink display running this ESPHome config](images/display.jpg)
 
-Add or replace the photo at [`images/display.jpg`](images/display.jpg) (see [`images/README.md`](images/README.md)). An optional wider hardware shot can go in `images/device.jpg`.
+Photo of a unit running this config (e-ink layout with battery % on the bottom bar). Replace [`images/display.jpg`](images/display.jpg) anytime — see [`images/README.md`](images/README.md). Optional wider hardware-only shot: `images/device.jpg`.
 
 > **Status:** Repository is private while the config is polished. It will be made public when ready. A follow-up PR to [devices.esphome.io](https://devices.esphome.io/devices/m5stack-airq/) is planned after that (catalog page uses a separate, validator-friendly `config.yaml` layout).
 
