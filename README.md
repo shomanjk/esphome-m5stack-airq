@@ -4,6 +4,12 @@ Community [ESPHome](https://esphome.io/) configuration for the [M5Stack AirQ](ht
 
 This example goes beyond a USB-only plug-and-flash config: it latches the battery **HOLD** line, reads pack voltage, shows a SoC gauge on the display, can shut down on low voltage, and switches between **Auto / USB / Battery** power profiles (SEN55 PM bursts + lower duty cycle on battery).
 
+## Display preview
+
+![M5Stack AirQ e-ink display running this ESPHome config](images/display.jpg)
+
+Add or replace the photo at [`images/display.jpg`](images/display.jpg) (see [`images/README.md`](images/README.md)). An optional wider hardware shot can go in `images/device.jpg`.
+
 > **Status:** Repository is private while the config is polished. It will be made public when ready. A follow-up PR to [devices.esphome.io](https://devices.esphome.io/devices/m5stack-airq/) is planned after that (catalog page uses a separate, validator-friendly `config.yaml` layout).
 
 ## Requirements
