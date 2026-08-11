@@ -18,6 +18,7 @@
 # 8. display_temperature_scale: "C" or "F" — e-ink Temp row only. Temperature API entity and offsets stay °C.
 # 9. Battery saver: WiFi power_save LIGHT, no web_server, SCD4x low_power_periodic, SEN55 PM bursts.
 #    Power mode select: Auto / USB / Battery. See usb_detect_voltage and battery_drain_rate diagnostics.
+# 10. PM channels use filter_out: nan so gas-only SEN55 updates do not wipe last full-measurement PM.
 #
 # Live HA installs may use device-specific secret names; this example uses generic secret keys.
 
@@ -50,8 +51,9 @@ substitutions:
   battery_shutdown_voltage: "3.30"
   # Auto power mode: at/above this pack V (with low drain) → USB/full; clearly below → battery saver.
   usb_detect_voltage: "4.12"
-  # Ignore battery_drain_rate older than this (ms) so a stale charging sample cannot pin Auto on USB.
-  battery_drain_max_age_ms: "180000"
+  # Ignore battery_drain_rate older than this (ms). Must exceed ADC publish cadence
+  # (sensor_interval × median send_every) so Auto does not flicker between samples.
+  battery_drain_max_age_ms: "210000"
 
 esphome:
   name: ${devicename}
@@ -103,6 +105,10 @@ globals:
     type: bool
     initial_value: "false"
   - id: power_profile_applied_once
+    type: bool
+    initial_value: "false"
+  # Remember LED on-state before Battery saver forces it off, so USB profile can restore it.
+  - id: led_was_on_before_battery
     type: bool
     initial_value: "false"
 
@@ -277,16 +283,19 @@ script:
                 } else if (mode == "USB") {
                   want_battery = false;
                 } else {
-                  // Auto: fresh rising pack V ⇒ charging/USB; fresh falling ⇒ on battery; else voltage.
-                  // Expire drain samples so a stale charging sign cannot pin USB after unplug
-                  // (ADC median only emits every ~5 min).
+                  // Auto: high pack V ⇒ USB; else honor a fresh drain sign; else voltage threshold.
+                  // Drain max-age must exceed ADC median publish cadence (interval × send_every)
+                  // so charging-below-threshold does not flicker Battery↔USB between samples.
+                  // Expiry still clears a stale charging sign after unplug once the age elapses.
                   const float v = id(battery_voltage).state;
                   const float drain = id(battery_drain_rate).state;
                   const uint32_t now = millis();
                   const bool drain_fresh =
                       !isnan(drain) && id(batt_drain_ms) != 0 &&
                       (now - id(batt_drain_ms)) < (${battery_drain_max_age_ms});
-                  if (drain_fresh && drain > 15.0f) {
+                  if (!isnan(v) && v >= (${usb_detect_voltage})) {
+                    want_battery = false;
+                  } else if (drain_fresh && drain > 15.0f) {
                     want_battery = true;
                   } else if (drain_fresh && drain < -15.0f) {
                     want_battery = false;
@@ -302,15 +311,16 @@ script:
                   lambda: |-
                     return !id(power_profile_applied_once) || id(on_battery) != id(on_battery_applied);
                 then:
-                  - lambda: |-
-                      id(on_battery_applied) = id(on_battery);
-                      id(power_profile_applied_once) = true;
+                  # Do not mark applied until the branch finishes: mode restart can cancel mid-delay
+                  # and a later invocation would otherwise skip setup, leaving SEN55 stopped.
                   - if:
                       condition:
                         lambda: return id(on_battery);
                       then:
                         - logger.log: "Power profile: BATTERY saver"
                         - script.stop: sen55_pm_burst
+                        - lambda: |-
+                            id(led_was_on_before_battery) = id(id_led).current_values.is_on();
                         - light.turn_off: id_led
                         - lambda: |-
                             // Stop continuous SEN55 polling; bursts + gas-only updates drive reads.
@@ -332,6 +342,9 @@ script:
                         - delay: 250ms
                         - component.update: sen55
                         - script.execute: sen55_pm_burst
+                        - lambda: |-
+                            id(on_battery_applied) = true;
+                            id(power_profile_applied_once) = true;
                       else:
                         - logger.log: "Power profile: USB full fidelity"
                         # Stop in-flight PM burst so it cannot flip SEN55 back to gas-only after USB setup.
@@ -356,6 +369,14 @@ script:
                         - delay: 250ms
                         - component.update: sen55
                         - component.update: disp
+                        - if:
+                            condition:
+                              lambda: return id(led_was_on_before_battery);
+                            then:
+                              - light.turn_on: id_led
+                        - lambda: |-
+                            id(on_battery_applied) = false;
+                            id(power_profile_applied_once) = true;
 
 interval:
   # Battery: PM burst every battery_pm_burst_interval (SEN55 fan only during settle window).
@@ -421,48 +442,28 @@ text_sensor:
     id: iaq_voc
     icon: "mdi:checkbox-marked-circle-outline"
     lambda: |-
-      if (int(id(voc).state) < 100.0) {
-        return {"Great"};
-      }
-      else if (int(id(voc).state) <= 200.0) {
-        return {"Good"};
-      }
-      else if (int(id(voc).state) <= 300.0) {
-        return {"Light"};
-      }
-      else if (int(id(voc).state) <= 400.0) {
-        return {"Moderate"};
-      }
-      else if (int(id(voc).state) <= 500.0) {
-        return {"Heavy"};
-      }
-      else {
-        return {"unknown"};
-      }
+      const float v = id(voc).state;
+      if (isnan(v)) return {"unknown"};
+      if (v < 100.0f) return {"Great"};
+      if (v <= 200.0f) return {"Good"};
+      if (v <= 300.0f) return {"Light"};
+      if (v <= 400.0f) return {"Moderate"};
+      if (v <= 500.0f) return {"Heavy"};
+      return {"unknown"};
 
   - platform: template
     name: "NOX IAQ Classification"
     id: iaq_nox
     icon: "mdi:checkbox-marked-circle-outline"
     lambda: |-
-      if (int(id(nox).state) < 100.0) {
-        return {"Great"};
-      }
-      else if (int(id(nox).state) <= 200.0) {
-        return {"Good"};
-      }
-      else if (int(id(nox).state) <= 300.0) {
-        return {"Light"};
-      }
-      else if (int(id(nox).state) <= 400.0) {
-        return {"Moderate"};
-      }
-      else if (int(id(nox).state) <= 500.0) {
-        return {"Heavy"};
-      }
-      else {
-        return {"unknown"};
-      }
+      const float v = id(nox).state;
+      if (isnan(v)) return {"unknown"};
+      if (v < 100.0f) return {"Great"};
+      if (v <= 200.0f) return {"Good"};
+      if (v <= 300.0f) return {"Light"};
+      if (v <= 400.0f) return {"Moderate"};
+      if (v <= 500.0f) return {"Heavy"};
+      return {"unknown"};
 
 sensor:
   - platform: uptime
@@ -481,8 +482,10 @@ sensor:
     samples: 4
     filters:
       - median:
+          # Publish ~every 2 min (with sensor_interval 60s) so drain freshness can stay aligned
+          # with battery_drain_max_age_ms without a ~5 min dead zone after USB unplug.
           window_size: 5
-          send_every: 5
+          send_every: 2
           send_first_at: 1
       - multiply: 2.0
     unit_of_measurement: "V"
@@ -620,22 +623,32 @@ sensor:
 
   - platform: sen5x
     id: sen55
+    # Drop NaN PM samples so gas-only SEN55 updates (battery saver) do not wipe the last
+    # full-measurement PM values published after a PM burst.
     pm_1_0:
       name: "PM 1"
       id: PM1_0
       accuracy_decimals: 2
+      filters:
+        - filter_out: nan
     pm_2_5:
       name: "PM 2.5"
       id: PM2_5
       accuracy_decimals: 2
+      filters:
+        - filter_out: nan
     pm_4_0:
       name: "PM 4"
       id: PM4_0
       accuracy_decimals: 2
+      filters:
+        - filter_out: nan
     pm_10_0:
       name: "PM 10"
       id: PM10_0
       accuracy_decimals: 2
+      filters:
+        - filter_out: nan
     temperature:
       name: "SEN55 Temperature"
       id: sen55_temperature
@@ -680,7 +693,13 @@ sensor:
     name: Temperature
     id: temperature
     lambda: |-
-      return (( id(sen55_temperature).state + id(CO2_temperature).state ) / 2 ) - id(temperature_offset).state;
+      const float a = id(sen55_temperature).state;
+      const float b = id(CO2_temperature).state;
+      const bool a_ok = !isnan(a);
+      const bool b_ok = !isnan(b);
+      if (!a_ok && !b_ok) return {};
+      const float avg = (a_ok && b_ok) ? (a + b) / 2.0f : (a_ok ? a : b);
+      return avg - id(temperature_offset).state;
     unit_of_measurement: "°C"
     icon: "mdi:thermometer"
     device_class: "temperature"
@@ -692,7 +711,13 @@ sensor:
     name: Humidity
     id: humidity
     lambda: |-
-      return (( id(sen55_humidity).state + id(CO2_humidity).state ) / 2) - id(humidity_offset).state;
+      const float a = id(sen55_humidity).state;
+      const float b = id(CO2_humidity).state;
+      const bool a_ok = !isnan(a);
+      const bool b_ok = !isnan(b);
+      if (!a_ok && !b_ok) return {};
+      const float avg = (a_ok && b_ok) ? (a + b) / 2.0f : (a_ok ? a : b);
+      return avg - id(humidity_offset).state;
     unit_of_measurement: "%"
     icon: "mdi:water-percent"
     device_class: "humidity"
@@ -813,7 +838,9 @@ display:
     model: 1.54inv2
     id: disp
     cs_pin: GPIO04
-    dc_pin: GPIO03
+    dc_pin:
+      number: GPIO03
+      ignore_strapping_warning: true
     reset_pin: GPIO02
     busy_pin:
       number: GPIO01
