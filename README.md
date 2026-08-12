@@ -2,7 +2,7 @@
 
 Community [ESPHome](https://esphome.io/) configuration for the [M5Stack AirQ](https://docs.m5stack.com/en/app/AirQ): StampS3 (ESP32-S3), Sensirion SEN55, SCD40, and 1.54″ e-ink display.
 
-This example goes beyond a USB-only plug-and-flash config: it latches the battery **HOLD** line, reads pack voltage, shows a SoC gauge on the display, can shut down on low voltage, and switches between **Auto / USB / Battery** power profiles (SEN55 PM bursts + lower duty cycle on battery).
+This example goes beyond a USB-only plug-and-flash config: it latches the battery **HOLD** line, reads pack voltage, shows a SoC gauge on the display, can shut down on low voltage, and switches between **Auto / Max / Eco** power profiles (SEN55 PM bursts + lower duty cycle on battery).
 
 ## Display preview
 
@@ -37,7 +37,7 @@ Or use the ESPHome dashboard / your usual builder workflow. Point the builder at
 | HOLD latch (`GPIO46`) | Internal `ALWAYS_ON` switch so battery power stays latched early in boot |
 | Battery voltage (`GPIO14`) | 1M/1M divider; YAML multiplies by 2 for pack V |
 | Battery % + e-ink gauge | Piecewise LiPo curve; shutdown uses **voltage**, not % |
-| Power mode select | Auto / USB / Battery — Auto uses pack V + drain-rate hysteresis |
+| Power mode select | Auto / Max / Eco — Auto uses pack V + voltage-rate hysteresis |
 | Battery saver | Wi‑Fi `LIGHT`, no `web_server`, SCD4x `low_power_periodic`, SEN55 PM bursts |
 | Display | Warm-up screen, SCD40 / SEN55 layout, clock (HA time with SNTP fallback) |
 
@@ -49,7 +49,7 @@ See comments at the top of [`airq.yaml`](airq.yaml). Important ones:
 - `clock_hours` — `"24"` or `"12"`
 - `display_temperature_scale` — `"C"` or `"F"` for the e-ink Temp row only (HA temperature entity stays °C)
 - `battery_shutdown_voltage` — `0` disables auto power-off; otherwise under-load pack volts for HOLD release
-- `usb_detect_voltage` — Auto mode threshold between USB/full and battery saver
+- `usb_detect_voltage` — Auto mode threshold between Max and Eco profiles
 
 ## Secrets
 
