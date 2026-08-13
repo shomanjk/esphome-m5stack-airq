@@ -57,6 +57,10 @@ substitutions:
   # Ignore battery_voltage_rate older than this (ms). Must exceed ADC publish cadence
   # (sensor_interval × median send_every) so Auto does not flicker between samples.
   battery_voltage_rate_max_age_ms: "210000"
+  # Secret *names* (not values). Overlay configs can point these at device-specific keys.
+  api_encryption_secret: api_encryption_key
+  ota_password_secret: ota_password
+  fallback_ap_password_secret: fallback_ap_password
 
 esphome:
   name: ${devicename}
@@ -121,11 +125,11 @@ logger:
 
 api:
   encryption:
-    key: !secret api_encryption_key
+    key: !secret ${api_encryption_secret}
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    password: !secret ${ota_password_secret}
 
 wifi:
   id: wifi_airq
@@ -137,7 +141,7 @@ wifi:
   # Password-protected fallback hotspot for recovery when Wi-Fi connection fails.
   ap:
     ssid: "${devicename} Fallback Hotspot"
-    password: !secret fallback_ap_password
+    password: !secret ${fallback_ap_password_secret}
 
 captive_portal:
 

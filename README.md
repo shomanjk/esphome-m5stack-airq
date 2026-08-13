@@ -62,6 +62,31 @@ fallback_ap_password: "..." # At least 8 characters; protects the recovery hotsp
 
 Generate an API key with `esphome wizard` / the ESPHome UI encryption key helper as you prefer.
 
+
+## Using as a Home Assistant package
+
+This file is also meant to be pulled from an ESPHome overlay so a live install can keep its own hostname, substitutions, and secret names:
+
+```yaml
+packages:
+  airq:
+    url: https://github.com/shomanjk/esphome-m5stack-airq
+    ref: main
+    files: [airq.yaml]
+    refresh: 1d
+
+substitutions:
+  location: Living Room
+  fallback_timezone: "Etc/UTC"
+  clock_hours: "12"
+  display_temperature_scale: "F"
+  api_encryption_secret: airq_api_encryption_key
+  ota_password_secret: airq_ota_password
+  fallback_ap_password_secret: airq_ap_password
+```
+
+Override `api_encryption_secret` / `ota_password_secret` / `fallback_ap_password_secret` to match keys already in that install's `secrets.yaml`. Standalone flashes can keep the defaults and copy `secrets.yaml.example`.
+
 ## Relationship to devices.esphome.io
 
 The [official device page](https://devices.esphome.io/devices/m5stack-airq/) hosts a catalog-style example. That site's contribution rules require a secrets-free, hardware-focused `config.yaml` (no `!secret`, limited top-level components). This repository is the full, Home Assistant-oriented configuration with battery management.
