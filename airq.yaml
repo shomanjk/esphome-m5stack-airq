@@ -17,7 +17,8 @@
 # 7. battery_shutdown_voltage: 0 = disabled; else when pack V stays at/below this after warm-up, HOLD is
 #    released to power off (USB can still run the board). Tuned under load (~33 mA USB/full profile).
 # 8. display_temperature_scale: "C" or "F" — e-ink Temp row only. Temperature API entity and offsets stay °C.
-# 9. Battery saver: WiFi power_save LIGHT, no web_server, SCD4x low_power_periodic, SEN55 PM bursts.
+# 9. Battery saver: WiFi power_save HIGH, no web_server, SCD4x low_power_periodic, SEN55 PM bursts.
+#    HIGH is the most aggressive modem sleep; fall back to LIGHT if the HA API drops on your AP.
 #    Power mode select: Auto / Max / Eco. See usb_detect_voltage and battery_voltage_rate diagnostics.
 # 10. PM channels use filter_out: nan so gas-only SEN55 updates do not wipe last full-measurement PM.
 # 11. Battery voltage rate (mV/h): positive = charging, negative = discharging.
@@ -130,8 +131,8 @@ wifi:
   id: wifi_airq
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # LIGHT usually keeps the HA API stable while cutting radio idle current.
-  power_save_mode: LIGHT
+  # HIGH = most aggressive modem sleep; validate HA stays connected on this AP (fallback: LIGHT).
+  power_save_mode: HIGH
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:

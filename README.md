@@ -38,7 +38,7 @@ Or use the ESPHome dashboard / your usual builder workflow. Point the builder at
 | Battery voltage (`GPIO14`) | 1M/1M divider; YAML multiplies by 2 for pack V |
 | Battery % + e-ink gauge | Piecewise LiPo curve; shutdown uses **voltage**, not % |
 | Power mode select | Auto / Max / Eco — Auto uses pack V + voltage-rate hysteresis |
-| Battery saver | Wi‑Fi `LIGHT`, no `web_server`, SCD4x `low_power_periodic`, SEN55 PM bursts |
+| Battery saver | Wi‑Fi `HIGH` (fall back to `LIGHT` if HA disconnects), no `web_server`, SCD4x `low_power_periodic`, SEN55 PM bursts |
 | Display | Warm-up screen, SCD40 / SEN55 layout, clock (HA time with SNTP fallback) |
 
 ## Substitutions (high level)
