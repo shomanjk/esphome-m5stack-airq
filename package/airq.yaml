@@ -131,6 +131,10 @@ logger:
 api:
   encryption:
     key: ${api_encryption_key}
+  actions:
+    - action: play_buzzer_alert
+      then:
+        - script.execute: buzzer_alert
 
 ota:
   - platform: esphome
@@ -154,6 +158,17 @@ output:
   - platform: gpio
     pin: GPIO10
     id: enable
+
+  # Onboard passive buzzer (BEEP) on GPIO9; RTTTL drives it through LEDC PWM.
+  - platform: ledc
+    pin: GPIO09
+    id: buzzer
+    frequency: 2000Hz
+
+rtttl:
+  output: buzzer
+  id: buzzer_rtttl
+  gain: 45%
 
 # HOLD (GPIO46): latch battery power as early as possible in setup (before long-running stacks).
 # on_boot alone can be too late — PMIC may release battery if HOLD is not high soon enough.
@@ -205,6 +220,12 @@ light:
     color_correct: [20%, 20%, 20%]
 
 script:
+  - id: buzzer_alert
+    mode: restart
+    then:
+      - rtttl.stop
+      - rtttl.play: "airq:d=16,o=7,b=140:c,p,c"
+
   - id: warmup_refresh
     mode: restart
     then:
@@ -815,6 +836,14 @@ button:
     on_press:
       then:
         - sen5x.start_fan_autoclean: sen55
+
+  - platform: template
+    name: "Test Buzzer"
+    disabled_by_default: true
+    entity_category: "diagnostic"
+    on_press:
+      then:
+        - script.execute: buzzer_alert
 
 number:
   - platform: template
