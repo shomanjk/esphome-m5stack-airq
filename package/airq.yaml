@@ -1,0 +1,1197 @@
+# M5Stack AirQ ESPHome package (no secret lookups)
+# ------------------------------------------
+# Device logic for the M5Stack AirQ (StampS3 + SEN55 + SCD40 + 1.54" e-ink).
+# Includes battery HOLD latch, pack voltage / SoC gauge, under-voltage shutdown,
+# and Auto / Max / Eco power profiles (SEN55 PM bursts on Eco). Option order preserves
+# NVS indices from older Auto / USB / Battery firmware.
+#
+# Remote Git packages cannot contain secret lookups (ESPHome packages docs).
+# Credentials are substitutions set by the clone-and-run wrapper (../airq.yaml)
+# or a local overlay: wifi_ssid, wifi_password, api_encryption_key, ota_password,
+# fallback_ap_password.
+#
+# Other substitutions (location, timezone, clock, display temp scale, battery
+# thresholds) have defaults here and may be overridden by the wrapper/overlay.
+#
+# 1. led_restore_mode: RESTORE_AND_OFF (default) or RESTORE_AND_ON after power loss.
+# 2. fallback_timezone: IANA zone matching Home Assistant (used by SNTP when HA API is down).
+# 3. clock_hours: "24" or "12" (12-hour with AM/PM on the e-ink clock).
+# 4. Battery: HOLD on GPIO46 (internal switch ALWAYS_ON). Pack voltage on GPIO14 (÷2 divider ×2 in YAML).
+#    Gauge is a piecewise LiPo curve from battery_empty_voltage–4.2 V → 0–100%. Shutdown uses voltage
+#    (battery_shutdown_voltage), not %, so display calibration and protection stay independent.
+# 5. battery_shutdown_voltage: 0 = disabled; else when pack V stays at/below this after warm-up, HOLD is
+#    released to power off (USB can still run the board). Cutoff is under-load pack voltage (resting V recovers higher).
+# 6. display_temperature_scale: "C" or "F" — e-ink Temp row only. Temperature API entity and offsets stay °C.
+# 7. Battery saver: WiFi power_save HIGH, no web_server, SCD4x low_power_periodic, SEN55 PM bursts.
+#    HIGH is the most aggressive modem sleep; fall back to LIGHT if the HA API drops on your AP.
+#    Power mode select: Auto / Max / Eco. See usb_detect_voltage and battery_voltage_rate diagnostics.
+# 8. PM channels use filter_out: nan so gas-only SEN55 updates do not wipe last full-measurement PM.
+# 9. Battery voltage rate (mV/h): positive = charging, negative = discharging.
+
+substitutions:
+  devicename: airq
+  friendlyname: AirQ
+  location: Living Room
+  sensor_interval: 60s
+  # Milliseconds for set_update_interval() lambdas (keep in sync with the *interval substitutions below).
+  sensor_interval_ms: "60000"
+  # Battery profile: sensors / PM burst cadence (display stays closer to sensor_interval for the clock).
+  battery_sensor_interval: 300s
+  battery_sensor_interval_ms: "300000"
+  battery_pm_burst_interval: 300s
+  battery_display_interval: 60s
+  battery_display_interval_ms: "60000"
+  # SEN55 full-measurement settle before reading PM in a battery burst.
+  sen55_pm_settle: 30s
+  altitude_compensation: "0m" # Local altitude for CO2 sensor
+  temp_offset: -3.0
+  temp_time_constant: 1200
+  led_restore_mode: RESTORE_AND_OFF
+  fallback_timezone: "Etc/UTC"
+  clock_hours: "24"
+  # E-ink Temp row only. "C" matches the °C sent to Home Assistant. "F" converts on the display (offset still applied in °C first).
+  display_temperature_scale: "C"
+  # Under-load pack voltage that maps to 0% on the gauge (matches protective cutoff by default).
+  battery_empty_voltage: "3.30"
+  # 0 = never auto-shutdown on battery. Otherwise release HOLD at/below this under-load pack voltage (V).
+  battery_shutdown_voltage: "3.30"
+  # Auto power mode: at/above this pack V (with low |voltage rate|) → Max; clearly below → Eco.
+  usb_detect_voltage: "4.12"
+  # Ignore battery_voltage_rate older than this (ms). Must exceed ADC publish cadence
+  # (sensor_interval × median send_every) so Auto does not flicker between samples.
+  battery_voltage_rate_max_age_ms: "210000"
+  # Credentials: required. Set by ../airq.yaml or a remote overlay from local secrets.
+  wifi_ssid: ""
+  wifi_password: ""
+  api_encryption_key: ""
+  ota_password: ""
+  fallback_ap_password: ""
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendlyname}
+  area: ${location}
+  on_boot:
+    - priority: 800
+      then:
+        # SEN55 power (G10). HOLD (G46) is latched by switch power_hold (ALWAYS_ON, setup_priority).
+        - output.turn_on: enable
+    - priority: 200 # after Wi-Fi / sensor init
+      then:
+        - script.execute: warmup_refresh
+
+esp32:
+  variant: esp32s3
+  # M5Stack AirQ = StampS3 (ESP32-S3FN8, 8 MB in-package flash). Set here because the
+  # esp32 flash_size default is 4MB and board:/platformio_options no longer carry it on
+  # the native ESP-IDF toolchain. Larger app partitions only take effect on a serial flash,
+  # not OTA (a serial reflash relocates NVS and resets restore_value state).
+  flash_size: 8MB
+  # ESPHome 2026+ defaults to ESP-IDF; set explicitly to silence the framework notice at compile time.
+  framework:
+    type: esp-idf
+
+globals:
+  - id: battery_first_draw_done
+    type: bool
+    initial_value: "false"
+  # Effective Eco profile (after Auto/Eco/Max select + voltage hysteresis).
+  - id: on_battery
+    type: bool
+    initial_value: "false"
+  - id: power_profile_ready
+    type: bool
+    initial_value: "false"
+  - id: batt_v_prev
+    type: float
+    initial_value: "NAN"
+  - id: batt_v_prev_ms
+    type: uint32_t
+    initial_value: "0"
+  # millis() when battery_voltage_rate was last published (0 = never).
+  - id: batt_voltage_rate_ms
+    type: uint32_t
+    initial_value: "0"
+  # Last applied on_battery so Auto re-checks do not thrash SEN55 every 120s.
+  - id: on_battery_applied
+    type: bool
+    initial_value: "false"
+  - id: power_profile_applied_once
+    type: bool
+    initial_value: "false"
+  # Remember LED on-state before Eco forces it off, so Max profile can restore it.
+  - id: led_was_on_before_battery
+    type: bool
+    initial_value: "false"
+
+# Default INFO; change to DEBUG (etc.) here when troubleshooting.
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: ${api_encryption_key}
+
+ota:
+  - platform: esphome
+    password: ${ota_password}
+
+wifi:
+  id: wifi_airq
+  ssid: ${wifi_ssid}
+  password: ${wifi_password}
+  # HIGH = most aggressive modem sleep; validate HA stays connected on this AP (fallback: LIGHT).
+  power_save_mode: HIGH
+
+  # Password-protected fallback hotspot for recovery when Wi-Fi connection fails.
+  ap:
+    ssid: "${devicename} Fallback Hotspot"
+    password: ${fallback_ap_password}
+
+captive_portal:
+
+output:
+  - platform: gpio
+    pin: GPIO10
+    id: enable
+
+# HOLD (GPIO46): latch battery power as early as possible in setup (before long-running stacks).
+# on_boot alone can be too late — PMIC may release battery if HOLD is not high soon enough.
+switch:
+  - platform: gpio
+    id: power_hold
+    name: HOLD latch
+    internal: true
+    restore_mode: ALWAYS_ON
+    setup_priority: 1000
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true
+
+# web_server removed — HA API + OTA cover day-to-day use; HTTP stack costs idle power on battery.
+
+i2c:
+  sda: GPIO11
+  scl: GPIO12
+  scan: false
+  frequency: 50kHz
+  id: bus_a
+
+spi:
+  clk_pin: GPIO05
+  mosi_pin: GPIO06
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+  - platform: sntp
+    id: sntp_time
+    timezone: "${fallback_timezone}"
+    # Optional: custom NTP servers
+    # servers:
+    #   - 0.pool.ntp.org
+    #   - 1.pool.ntp.org
+
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    pin: GPIO21
+    num_leds: 1
+    chipset: SK6812
+    name: "LED"
+    restore_mode: ${led_restore_mode}
+    id: id_led
+    color_correct: [20%, 20%, 20%]
+
+script:
+  - id: warmup_refresh
+    mode: restart
+    then:
+      # First warm-up frame: force a full e-ink refresh so boot/OTA ghosting
+      # clears without needing Button A. Then restore the normal cadence.
+      - lambda: id(disp).set_full_update_every(1);
+      - component.update: disp
+      - lambda: id(disp).set_full_update_every(20);
+      - delay: 20s
+      # ~5 more redraws over the rest of the 2 min warm-up. Keep the
+      # "Warming up…" screen visible without thrashing the e-ink panel.
+      - while:
+          condition:
+            lambda: |-
+              return id(uptime_sensor).state < 120;
+          then:
+            - component.update: disp
+            - delay: 20s
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(id(battery_percent).state) && !id(battery_first_draw_done);
+          then:
+            - globals.set:
+                id: battery_first_draw_done
+                value: "true"
+            - component.update: disp
+      - globals.set:
+          id: power_profile_ready
+          value: "true"
+      - script.execute: apply_power_profile
+
+  # SEN55 commands (public SensirionI2CDevice::write_command — no ESPHome start/stop actions):
+  #   0x0021 full measurement (fan+laser ~63 mA)
+  #   0x0037 RHT/gas-only (~6.8 mA, VOC/NOx/RH/T)
+  #   0x3f86 stop measurements (~2.6 mA idle); wait ≥200 ms before next command
+  - id: sen55_pm_burst
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return id(on_battery);
+          then:
+            - logger.log: "SEN55 PM burst: full measurement"
+            - lambda: |-
+                id(sen55).write_command((uint16_t) 0x3f86);
+            - delay: 250ms
+            - if:
+                condition:
+                  lambda: return id(on_battery);
+                then:
+                  - lambda: |-
+                      id(sen55).write_command((uint16_t) 0x0021);
+                  - delay: ${sen55_pm_settle}
+                  # Re-check after settle: apply_power_profile may have switched to Max meanwhile.
+                  - if:
+                      condition:
+                        lambda: return id(on_battery);
+                      then:
+                        - component.update: sen55
+                        - delay: 1s
+                        - if:
+                            condition:
+                              lambda: return id(on_battery);
+                            then:
+                              - lambda: |-
+                                  id(sen55).write_command((uint16_t) 0x3f86);
+                              - delay: 250ms
+                              - if:
+                                  condition:
+                                    lambda: return id(on_battery);
+                                  then:
+                                    - lambda: |-
+                                        id(sen55).write_command((uint16_t) 0x0037);
+                                    - delay: 250ms
+                                    - component.update: sen55
+                                    - component.update: temperature
+                                    - component.update: humidity
+                                    - component.update: disp
+
+  - id: apply_power_profile
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: return !id(power_profile_ready);
+          then:
+            - logger.log: "Power profile deferred until warm-up finishes"
+          else:
+            - lambda: |-
+                bool want_battery = false;
+                const std::string mode = id(power_mode).current_option();
+                // Eco = saver; Max = full fidelity. Accept legacy USB/Battery from older firmware NVS.
+                if (mode == "Eco" || mode == "Battery") {
+                  want_battery = true;
+                } else if (mode == "Max" || mode == "USB") {
+                  want_battery = false;
+                } else {
+                  // Auto: high pack V ⇒ Max; else honor a fresh voltage-rate sign; else threshold.
+                  // Rate max-age must exceed ADC median publish cadence (interval × send_every)
+                  // so charging-below-threshold does not flicker Eco↔Max between samples.
+                  // Expiry still clears a stale charging sign after unplug once the age elapses.
+                  // battery_voltage_rate: positive = charging (V rising), negative = discharging.
+                  const float v = id(battery_voltage).state;
+                  const float vrate = id(battery_voltage_rate).state;
+                  const uint32_t now = millis();
+                  const bool rate_fresh =
+                      !isnan(vrate) && id(batt_voltage_rate_ms) != 0 &&
+                      (now - id(batt_voltage_rate_ms)) < (${battery_voltage_rate_max_age_ms});
+                  if (!isnan(v) && v >= (${usb_detect_voltage})) {
+                    want_battery = false;
+                  } else if (rate_fresh && vrate < -15.0f) {
+                    want_battery = true;
+                  } else if (rate_fresh && vrate > 15.0f) {
+                    want_battery = false;
+                  } else if (!isnan(v)) {
+                    want_battery = v < (${usb_detect_voltage});
+                  } else {
+                    want_battery = false;
+                  }
+                }
+                id(on_battery) = want_battery;
+            - if:
+                condition:
+                  lambda: |-
+                    return !id(power_profile_applied_once) || id(on_battery) != id(on_battery_applied);
+                then:
+                  # Do not mark applied until the branch finishes: mode restart can cancel mid-delay
+                  # and a later invocation would otherwise skip setup, leaving SEN55 stopped.
+                  - if:
+                      condition:
+                        lambda: return id(on_battery);
+                      then:
+                        - logger.log: "Power profile: Eco"
+                        - script.stop: sen55_pm_burst
+                        - lambda: |-
+                            // Snapshot only when entering Eco from Max/unset. A mid-Eco
+                            // script restart must not overwrite a saved "was on" after LED is off.
+                            if (!id(on_battery_applied)) {
+                              id(led_was_on_before_battery) = id(id_led).current_values.is_on();
+                            }
+                        - light.turn_off: id_led
+                        - lambda: |-
+                            // Stop continuous SEN55 polling; bursts + gas-only updates drive reads.
+                            id(sen55).stop_poller();
+                            id(sen55).write_command((uint16_t) 0x3f86);
+                        - delay: 250ms
+                        - lambda: |-
+                            id(sen55).write_command((uint16_t) 0x0037);
+                            id(scd40).set_update_interval(${battery_sensor_interval_ms});
+                            id(scd40).start_poller();
+                            id(temperature).set_update_interval(${battery_sensor_interval_ms});
+                            id(temperature).start_poller();
+                            id(humidity).set_update_interval(${battery_sensor_interval_ms});
+                            id(humidity).start_poller();
+                            id(disp).set_update_interval(${battery_display_interval_ms});
+                            id(disp).start_poller();
+                            id(wifi_signal_db).set_update_interval(${battery_sensor_interval_ms});
+                            id(wifi_signal_db).start_poller();
+                        - delay: 250ms
+                        - component.update: sen55
+                        - script.execute: sen55_pm_burst
+                        - component.update: disp
+                        - lambda: |-
+                            id(on_battery_applied) = true;
+                            id(power_profile_applied_once) = true;
+                      else:
+                        - logger.log: "Power profile: Max"
+                        # Stop in-flight PM burst so it cannot flip SEN55 back to gas-only after Max setup.
+                        - script.stop: sen55_pm_burst
+                        - lambda: |-
+                            id(sen55).write_command((uint16_t) 0x3f86);
+                        - delay: 250ms
+                        - lambda: |-
+                            id(sen55).write_command((uint16_t) 0x0021);
+                            id(sen55).set_update_interval(${sensor_interval_ms});
+                            id(sen55).start_poller();
+                            id(scd40).set_update_interval(${sensor_interval_ms});
+                            id(scd40).start_poller();
+                            id(temperature).set_update_interval(${sensor_interval_ms});
+                            id(temperature).start_poller();
+                            id(humidity).set_update_interval(${sensor_interval_ms});
+                            id(humidity).start_poller();
+                            id(disp).set_update_interval(${sensor_interval_ms});
+                            id(disp).start_poller();
+                            id(wifi_signal_db).set_update_interval(${sensor_interval_ms});
+                            id(wifi_signal_db).start_poller();
+                        - delay: 250ms
+                        - component.update: sen55
+                        - component.update: disp
+                        - if:
+                            condition:
+                              lambda: return id(led_was_on_before_battery);
+                            then:
+                              - light.turn_on: id_led
+                        - lambda: |-
+                            id(on_battery_applied) = false;
+                            id(power_profile_applied_once) = true;
+
+interval:
+  # Battery: PM burst every battery_pm_burst_interval (SEN55 fan only during settle window).
+  - interval: ${battery_pm_burst_interval}
+    then:
+      - if:
+          condition:
+            lambda: return id(power_profile_ready) && id(on_battery);
+          then:
+            - script.execute: sen55_pm_burst
+  # Battery: refresh VOC/RH/T from gas-only mode between PM bursts.
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            lambda: return id(power_profile_ready) && id(on_battery);
+          then:
+            - component.update: sen55
+            - component.update: temperature
+            - component.update: humidity
+  # Re-evaluate Auto profile periodically (voltage / voltage-rate hysteresis).
+  - interval: 120s
+    then:
+      - if:
+          condition:
+            lambda: return id(power_profile_ready);
+          then:
+            - script.execute: apply_power_profile
+  # Periodic battery summary for HA logs.
+  - interval: 10min
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(power_profile_ready) && !isnan(id(battery_voltage).state);
+          then:
+            - logger.log:
+                format: "Battery health: %.2f V, %.0f%%, voltage rate %+.0f mV/h, profile=%s"
+                args:
+                  - 'id(battery_voltage).state'
+                  - 'id(battery_percent).state'
+                  - 'id(battery_voltage_rate).state'
+                  - 'id(on_battery) ? "eco" : "max"'
+
+text_sensor:
+  - platform: wifi_info
+    ssid:
+      name: SSID
+      id: ssid
+      entity_category: diagnostic
+      disabled_by_default: true
+
+  - platform: template
+    name: "Power profile"
+    id: power_profile_text
+    icon: "mdi:battery-charging"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: 60s
+    lambda: |-
+      if (!id(power_profile_ready)) return {"Warming up"};
+      return {id(on_battery) ? "Eco" : "Max"};
+
+  - platform: template
+    name: "VOC IAQ Classification"
+    id: iaq_voc
+    icon: "mdi:checkbox-marked-circle-outline"
+    lambda: |-
+      const float v = id(voc).state;
+      if (isnan(v)) return {"unknown"};
+      if (v < 100.0f) return {"Great"};
+      if (v <= 200.0f) return {"Good"};
+      if (v <= 300.0f) return {"Light"};
+      if (v <= 400.0f) return {"Moderate"};
+      if (v <= 500.0f) return {"Heavy"};
+      return {"unknown"};
+
+  - platform: template
+    name: "NOX IAQ Classification"
+    id: iaq_nox
+    icon: "mdi:checkbox-marked-circle-outline"
+    lambda: |-
+      const float v = id(nox).state;
+      if (isnan(v)) return {"unknown"};
+      if (v < 100.0f) return {"Great"};
+      if (v <= 200.0f) return {"Good"};
+      if (v <= 300.0f) return {"Light"};
+      if (v <= 400.0f) return {"Moderate"};
+      if (v <= 500.0f) return {"Heavy"};
+      return {"unknown"};
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+    update_interval: 10s
+    internal: true
+
+  # VBAT via 1M/1M divider on G14 → pin voltage ≈ Vpack/2 (M5 Air Q schematic).
+  - platform: adc
+    pin: GPIO14
+    id: battery_voltage
+    name: "Battery voltage"
+    attenuation: 12db
+    update_interval: $sensor_interval
+    samples: 4
+    filters:
+      - median:
+          # Publish ~every 2 min (with sensor_interval 60s) so voltage-rate freshness can stay aligned
+          # with battery_voltage_rate_max_age_ms without a ~5 min dead zone after USB unplug.
+          window_size: 5
+          send_every: 2
+          send_first_at: 1
+      - multiply: 2.0
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    entity_category: diagnostic
+    # Protective cutoff is voltage-based (not gauge %), under load. Recheck once to ignore brief sags.
+    on_value:
+      - lambda: |-
+          // Battery voltage rate (mV/h): positive = charging (V rising), negative = discharging.
+          // Steeper |mV/h| at the same SoC means a harder discharge.
+          if (!isnan(x)) {
+            const uint32_t now = millis();
+            if (!isnan(id(batt_v_prev)) && id(batt_v_prev_ms) > 0 && now > id(batt_v_prev_ms)) {
+              const float hours = (now - id(batt_v_prev_ms)) / 3600000.0f;
+              if (hours >= (50.0f / 3600.0f)) {  // ≥ ~50 s between samples
+                const float mv_per_h = (x - id(batt_v_prev)) * 1000.0f / hours;
+                id(battery_voltage_rate).publish_state(mv_per_h);
+                id(batt_voltage_rate_ms) = now;
+              }
+            }
+            id(batt_v_prev) = x;
+            id(batt_v_prev_ms) = now;
+          }
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(x) && (${battery_shutdown_voltage}) > 0.0f &&
+                     x <= (${battery_shutdown_voltage}) && id(uptime_sensor).state >= 120.0f;
+          then:
+            - logger.log:
+                format: "Battery %.2f V at/below shutdown threshold; rechecking in 5s"
+                args: ['x']
+            - delay: 5s
+            - if:
+                condition:
+                  lambda: |-
+                    return !isnan(id(battery_voltage).state) &&
+                           id(battery_voltage).state <= (${battery_shutdown_voltage});
+                then:
+                  - logger.log:
+                      format: "Releasing HOLD at %.2f V — power off on battery (plug USB to charge/boot)"
+                      args: ['id(battery_voltage).state']
+                  - switch.turn_off: power_hold
+
+  - platform: template
+    name: "Battery voltage rate"
+    id: battery_voltage_rate
+    unit_of_measurement: "mV/h"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    disabled_by_default: true
+    state_class: measurement
+    update_interval: never
+    icon: "mdi:battery-sync"
+    # Positive = charging (pack V rising); negative = discharging.
+
+  - platform: template
+    name: "Battery level"
+    id: battery_percent
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    update_interval: $sensor_interval
+    # Piecewise LiPo SoC under light load. Empty = battery_empty_voltage (aligned with shutdown).
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (isnan(v)) return {};
+      const float v_empty = ${battery_empty_voltage};
+      const float v_full = 4.20f;
+      if (v >= v_full) return 100.0f;
+      if (v <= v_empty) return 0.0f;
+      // Typical LiPo resting/light-load curve (interpolated between knots)
+      if (v >= 4.10f) return 90.0f + (v - 4.10f) / 0.10f * 10.0f;
+      if (v >= 4.00f) return 80.0f + (v - 4.00f) / 0.10f * 10.0f;
+      if (v >= 3.90f) return 65.0f + (v - 3.90f) / 0.10f * 15.0f;
+      if (v >= 3.80f) return 50.0f + (v - 3.80f) / 0.10f * 15.0f;
+      if (v >= 3.70f) return 35.0f + (v - 3.70f) / 0.10f * 15.0f;
+      if (v >= 3.60f) return 22.0f + (v - 3.60f) / 0.10f * 13.0f;
+      if (v >= 3.50f) return 12.0f + (v - 3.50f) / 0.10f * 10.0f;
+      if (v >= 3.40f) return 5.0f + (v - 3.40f) / 0.10f * 7.0f;
+      return (v - v_empty) / (3.40f - v_empty) * 5.0f;
+    # First valid % after warm-up: redraw once so the e-ink bar is not stuck until the next display interval.
+    # (Require uptime >= 120 so we do not consume the one shot during the warming-up screen.)
+    on_value:
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(x) && !id(battery_first_draw_done) && id(uptime_sensor).state >= 120.0f;
+          then:
+            - globals.set:
+                id: battery_first_draw_done
+                value: "true"
+            - component.update: disp
+
+  - platform: scd4x
+    id: scd40
+    co2:
+      name: CO2
+      id: CO2
+      filters:
+        - lambda: |-
+            float MIN_VALUE = 300.0;
+            float MAX_VALUE = 2500.0;
+            if (MIN_VALUE <= x && x <= MAX_VALUE) return x;
+            else return {};
+    temperature:
+      name: CO2 Temperature
+      id: CO2_temperature
+      entity_category: diagnostic
+      disabled_by_default: true
+      filters:
+        - lambda: |-
+            float MIN_VALUE = -40.0;
+            float MAX_VALUE = 100.0;
+            if (MIN_VALUE <= x && x <= MAX_VALUE) return x;
+            else return {};
+    humidity:
+      name: CO2 Humidity
+      id: CO2_humidity
+      entity_category: diagnostic
+      disabled_by_default: true
+      filters:
+        - lambda: |-
+            float MIN_VALUE = 0.0;
+            float MAX_VALUE = 100.0;
+            if (MIN_VALUE <= x && x <= MAX_VALUE) return x;
+            else return {};
+    altitude_compensation: ${altitude_compensation}
+    address: 0x62
+    # SCD40: low_power_periodic (~30 s internal) cuts sensor current >80% vs default periodic.
+    measurement_mode: low_power_periodic
+    update_interval: $sensor_interval
+
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "Wifi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: sen5x
+    id: sen55
+    # Drop NaN PM samples so gas-only SEN55 updates (battery saver) do not wipe the last
+    # full-measurement PM values published after a PM burst.
+    pm_1_0:
+      name: "PM 1"
+      id: PM1_0
+      accuracy_decimals: 2
+      filters:
+        - filter_out: nan
+    pm_2_5:
+      name: "PM 2.5"
+      id: PM2_5
+      accuracy_decimals: 2
+      filters:
+        - filter_out: nan
+    pm_4_0:
+      name: "PM 4"
+      id: PM4_0
+      accuracy_decimals: 2
+      filters:
+        - filter_out: nan
+    pm_10_0:
+      name: "PM 10"
+      id: PM10_0
+      accuracy_decimals: 2
+      filters:
+        - filter_out: nan
+    temperature:
+      name: "SEN55 Temperature"
+      id: sen55_temperature
+      accuracy_decimals: 2
+      entity_category: diagnostic
+      disabled_by_default: true
+    humidity:
+      name: "SEN55 Humidity"
+      id: sen55_humidity
+      accuracy_decimals: 2
+      entity_category: diagnostic
+      disabled_by_default: true
+    voc:
+      name: VOC
+      id: voc
+      accuracy_decimals: 2
+      algorithm_tuning:
+        index_offset: 100
+        learning_time_offset_hours: 12
+        learning_time_gain_hours: 12
+        gating_max_duration_minutes: 180
+        std_initial: 50
+        gain_factor: 230
+    nox:
+      name: NOX
+      id: nox
+      accuracy_decimals: 2
+      algorithm_tuning:
+        index_offset: 100
+        learning_time_offset_hours: 12
+        learning_time_gain_hours: 12
+        gating_max_duration_minutes: 180
+        std_initial: 50
+        gain_factor: 230
+    temperature_compensation:
+      offset: ${temp_offset}
+      normalized_offset_slope: 0
+      time_constant: ${temp_time_constant}
+    acceleration_mode: low
+    store_baseline: true
+    address: 0x69
+    update_interval: $sensor_interval
+
+  # Published to Home Assistant in °C (device_class temperature). E-ink scale is display_temperature_scale only.
+  - platform: template
+    name: Temperature
+    id: temperature
+    lambda: |-
+      const float a = id(sen55_temperature).state;
+      const float b = id(CO2_temperature).state;
+      const bool a_ok = !isnan(a);
+      const bool b_ok = !isnan(b);
+      if (!a_ok && !b_ok) return {};
+      const float avg = (a_ok && b_ok) ? (a + b) / 2.0f : (a_ok ? a : b);
+      return avg - id(temperature_offset).state;
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    device_class: "temperature"
+    state_class: "measurement"
+    update_interval: $sensor_interval
+    accuracy_decimals: 2
+
+  - platform: template
+    name: Humidity
+    id: humidity
+    lambda: |-
+      const float a = id(sen55_humidity).state;
+      const float b = id(CO2_humidity).state;
+      const bool a_ok = !isnan(a);
+      const bool b_ok = !isnan(b);
+      if (!a_ok && !b_ok) return {};
+      const float avg = (a_ok && b_ok) ? (a + b) / 2.0f : (a_ok ? a : b);
+      return avg - id(humidity_offset).state;
+    unit_of_measurement: "%"
+    icon: "mdi:water-percent"
+    device_class: "humidity"
+    state_class: "measurement"
+    update_interval: $sensor_interval
+    accuracy_decimals: 2
+
+binary_sensor:
+  - platform: gpio
+    name: Button A
+    disabled_by_default: true
+    pin:
+      number: GPIO0
+      ignore_strapping_warning: true
+      mode:
+        input: true
+      inverted: true
+    on_press:
+      then:
+        - component.update: disp
+
+  - platform: gpio
+    pin:
+      number: GPIO08
+      #      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: Button B
+    disabled_by_default: true
+
+  - platform: gpio
+    pin:
+      number: GPIO42
+    #      ignore_strapping_warning: true
+    name: Button Power
+    disabled_by_default: true
+
+button:
+  - platform: restart
+    name: Restart
+
+  - platform: template
+    name: "CO2 Force Manual Calibration"
+    entity_category: "config"
+    on_press:
+      then:
+        - scd4x.perform_forced_calibration:
+            value: !lambda "return id(co2_cal).state;"
+
+  - platform: template
+    name: "SEN55 Force Manual Clean"
+    entity_category: "config"
+    on_press:
+      then:
+        - sen5x.start_fan_autoclean: sen55
+
+number:
+  - platform: template
+    name: "CO2 Calibration Value"
+    optimistic: true
+    min_value: 400
+    max_value: 1000
+    step: 5
+    id: co2_cal
+    icon: "mdi:molecule-co2"
+    entity_category: "config"
+
+  - platform: template
+    name: Humidity Offset
+    id: humidity_offset
+    restore_value: true
+    initial_value: 0.0
+    min_value: -70.0
+    max_value: 70.0
+    entity_category: "CONFIG"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 0.1
+    mode: box
+
+  # Always °C: subtracted from the merged average before publish. Not converted when display_temperature_scale is F.
+  - platform: template
+    name: Temperature Offset
+    id: temperature_offset
+    restore_value: true
+    initial_value: 0.0
+    min_value: -70.0
+    max_value: 70.0
+    entity_category: "CONFIG"
+    unit_of_measurement: "°C"
+    optimistic: true
+    update_interval: never
+    step: 0.1
+    mode: box
+
+select:
+  - platform: template
+    name: "Power mode"
+    id: power_mode
+    icon: "mdi:power-settings"
+    entity_category: config
+    # Order must stay Auto / Max / Eco so restore_value indices match legacy Auto / USB / Battery.
+    options:
+      - Auto
+      - Max
+      - Eco
+    initial_option: Auto
+    optimistic: true
+    restore_value: true
+    on_value:
+      - logger.log:
+          format: "Power mode select → %s"
+          args: ['x.c_str()']
+      - lambda: id(power_profile_applied_once) = false;
+      - script.execute: apply_power_profile
+
+display:
+  - platform: waveshare_epaper
+    model: 1.54inv2
+    id: disp
+    cs_pin: GPIO04
+    dc_pin:
+      number: GPIO03
+      ignore_strapping_warning: true
+    reset_pin: GPIO02
+    busy_pin:
+      number: GPIO01
+      inverted: false
+    full_update_every: 20
+    reset_duration: 2ms
+    update_interval: $sensor_interval
+    lambda: |-
+      // 1) Warming up: first 120 s, show message only
+      if (id(uptime_sensor).state < 120) {
+        it.fill(COLOR_OFF);
+        it.printf(it.get_width()/2, it.get_height()/2 - 16,
+                  id(f18), COLOR_ON, TextAlign::CENTER,
+                  "Warming up sensors");
+        it.printf(it.get_width()/2, it.get_height()/2 + 16,
+                  id(f16), COLOR_ON, TextAlign::CENTER,
+                  "Waiting for 2 minutes");
+        return;
+      }
+
+      // 2) Grid lines
+      // Vertical divider
+      it.line(100, 0,   100, 200);
+      // Top horizontal divider (optional)
+      //it.line(0,   50, 200, 0);
+      // Mid line under SEN55, right side only (x ≥ 100)
+      // it.line(100,120,200,120);
+      // Right edge
+      it.line(it.get_width()-1, 0, it.get_width()-1, it.get_height());
+
+      // 3) Layout regions (footer band y 152–200; sensor columns end above)
+      // SCD40: bottom-left, no bottom border on inner box
+      it.line(0,   50, 0,   152);   // left edge
+      it.line(0,   50, 100, 50);    // top edge
+      //it.line(100, 50, 100,152);    // right edge of left column
+      // SEN55: top-right (y 0–152)
+      it.rectangle(100, 0, 100, 152);
+      // Wi-Fi: bottom-right (y 152–200)
+      //it.rectangle(100,152,100, 48);
+      // Optional: bottom-left panel for a logo
+      it.rectangle(0, 152,100, 48);
+
+      // 4) Clock & date — HA when API connected; else SNTP + fallback_timezone
+      char buf[24];
+      if (global_api_server->is_connected() && id(ha_time).now().is_valid()) {
+        auto t = id(ha_time).now();
+        if (strcmp("${clock_hours}", "12") == 0) {
+          int h12 = t.hour % 12;
+          if (h12 == 0) {
+            h12 = 12;
+          }
+          const char *suffix = (t.hour < 12) ? "AM" : "PM";
+          snprintf(buf, sizeof(buf), "%d:%02d %s", h12, t.minute, suffix);
+        } else {
+          snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute);
+        }
+        it.printf(2, 0, id(f24), COLOR_ON, TextAlign::TOP_LEFT, "%s", buf);
+        t.strftime(buf, sizeof(buf), "%Y-%m-%d");
+        it.printf(2, 30, id(f13), COLOR_ON, TextAlign::TOP_LEFT, "%s", buf);
+      } else if (id(sntp_time).now().is_valid()) {
+        auto t = id(sntp_time).now();
+        if (strcmp("${clock_hours}", "12") == 0) {
+          int h12 = t.hour % 12;
+          if (h12 == 0) {
+            h12 = 12;
+          }
+          const char *suffix = (t.hour < 12) ? "AM" : "PM";
+          snprintf(buf, sizeof(buf), "%d:%02d %s", h12, t.minute, suffix);
+        } else {
+          snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute);
+        }
+        it.printf(2, 0, id(f24), COLOR_ON, TextAlign::TOP_LEFT, "%s", buf);
+        t.strftime(buf, sizeof(buf), "%Y-%m-%d");
+        it.printf(2, 30, id(f13), COLOR_ON, TextAlign::TOP_LEFT, "%s", buf);
+      } else {
+        it.print(2, 0, id(f24), COLOR_ON, TextAlign::TOP_LEFT, "--:--");
+        it.print(2, 30, id(f13), COLOR_ON, TextAlign::TOP_LEFT, "----/--/--");
+      }
+
+      // 5) SCD40 (left column x=0–100): hug left rule + mid divider; pull values left toward labels
+      it.printf(2, 52,  id(f16), COLOR_ON, TextAlign::TOP_LEFT, "SCD40");
+      it.printf(2, 75,  id(sensor_label_font), COLOR_ON, TextAlign::TOP_LEFT, "CO₂:");
+      it.printf(96, 75,  id(f16_bold), COLOR_ON, TextAlign::TOP_RIGHT, "%.0f", id(CO2).state);
+      it.printf(2, 95,  id(sensor_label_font), COLOR_ON, TextAlign::TOP_LEFT, "Temp:");
+      {
+        float temp_c = id(temperature).state;
+        if (strcmp("${display_temperature_scale}", "F") == 0) {
+          char temp_buf[16];
+          float temp_f = isnan(temp_c) ? temp_c : (temp_c * 9.0f / 5.0f + 32.0f);
+          snprintf(temp_buf, sizeof(temp_buf), "%.1fF", temp_f);
+          it.printf(96, 95, id(f16_bold), COLOR_ON, TextAlign::TOP_RIGHT, "%s", temp_buf);
+        } else {
+          it.printf(96, 95, id(f16_bold), COLOR_ON, TextAlign::TOP_RIGHT, "%.1f", temp_c);
+        }
+      }
+      it.printf(2, 115, id(sensor_label_font), COLOR_ON, TextAlign::TOP_LEFT, "Humid:");
+      it.printf(96, 115, id(f16_bold), COLOR_ON, TextAlign::TOP_RIGHT, "%.1f", id(humidity).state);
+
+      // 6) SEN55 (right column x=100–199): hug divider + right rule; pull values left toward labels
+      it.printf(101, 2, id(f16), COLOR_ON, TextAlign::TOP_LEFT, "SEN55");
+      const char* labels[] = {"PM1.0:","PM2.5:","PM4.0:","PM10:","VOC:","NOX:"};
+      float vals[] = {
+        id(PM1_0).state, id(PM2_5).state, id(PM4_0).state, id(PM10_0).state,
+        id(voc).state, id(nox).state
+      };
+      for(int i = 0; i < 6; i++) {
+        int y = 25 + i * 20;
+        it.printf(101, y, id(sensor_label_font), COLOR_ON, TextAlign::TOP_LEFT,  labels[i]);
+        it.printf(196, y, id(f16_bold), COLOR_ON, TextAlign::TOP_RIGHT,
+                  i < 4 ? "%.1f" : "%.0f", vals[i]);
+      }
+
+      // 7) Wi-Fi (bottom-right, y 152–200)
+      it.printf(101, 153, id(f16), COLOR_ON, TextAlign::TOP_LEFT, "WIFI");
+      it.printf(101, 174, id(sensor_label_font), COLOR_ON, TextAlign::TOP_LEFT, "%s", id(ssid).state.c_str());
+
+      // 8) Battery % + power-profile icon + friendly name (bottom-left, inverted panel)
+      // Icon Y is above the fill so Material Symbols' empty glyph padding clips away and
+      // the visible ink sits near the top of the black box (clears AirQ below).
+      it.filled_rectangle(1, 153, 98, 46, COLOR_ON);
+      it.print(1, 146, id(font_profile_icon), COLOR_OFF, TextAlign::TOP_LEFT,
+               id(on_battery) ? "\U0000EA35" : "\U0000E9E4");
+      if (!isnan(id(battery_percent).state)) {
+        it.printf(72, 160, id(f13), COLOR_OFF, TextAlign::CENTER, "%.0f%%",
+                  id(battery_percent).state);
+      } else {
+        it.print(72, 160, id(f13), COLOR_OFF, TextAlign::CENTER, "--%");
+      }
+      it.print(50, 184, id(f18), COLOR_OFF, TextAlign::CENTER, "${friendlyname}");
+
+font:
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 500
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+    id: f16
+    size: 16
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 700
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+    id: f16_bold
+    size: 16
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 500
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+    id: f18
+    size: 18
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 500
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+    id: f13
+    size: 13
+  - file:
+      type: gfonts
+      family: Material Symbols Sharp
+      weight: 400
+    id: font_profile_icon
+    size: 30
+    glyphs:
+      - "\U0000EA35"  # eco (leaf) — Eco profile
+      - "\U0000E9E4"  # speed — Max profile
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 500
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³₂’'
+    id: sensor_label_font
+    size: 16
+  - file:
+      type: gfonts
+      family: Noto Sans Display
+      weight: 500
+    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+    id: f24
+    size: 24
+  # Inactive alternate-layout fonts. Uncomment only when a display lambda uses them.
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f36
+  #   size: 36
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f48
+  #   size: 48
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f32
+  #   size: 32
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f64
+  #   size: 64
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 800
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f64b
+  #   size: 64
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 800
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f55b
+  #   size: 55
+
+# ----------------------------------------------------------
+# Unused weather icons — enable when the display lambda draws them.
+# ----------------------------------------------------------
+
+# - file:
+#     type: gfonts
+#     family: Material Symbols Sharp
+#     weight: 400
+#   id: font_weather_icons_xsmall
+#   size: 20
+#   glyphs:
+#     - "\U0000F159" # clear-night
+#     - "\U0000F15B" # cloudy
+#     - "\U0000F172" # partlycloudy
+#     - "\U0000E818" # fog
+#     - "\U0000F67F" # hail
+#     - "\U0000EBDB" # lightning, lightning-rainy
+#     - "\U0000F61F" # pouring
+#     - "\U0000F61E" # rainy
+#     - "\U0000F61C" # snowy
+#     - "\U0000F61D" # snowy-rainy
+#     - "\U0000E81A" # sunny
+#     - "\U0000EFD8" # windy, windy-variant
+#     - "\U0000F7F3" # exceptional
+#
+# - file:
+#     type: gfonts
+#     family: Material Symbols Sharp
+#     weight: 400
+#   id: font_weather_icons_small
+#   size: 32
+#   glyphs:
+#     - "\U0000F159" # clear-night
+#     - "\U0000F15B" # cloudy
+#     - "\U0000F172" # partlycloudy
+#     - "\U0000E818" # fog
+#     - "\U0000F67F" # hail
+#     - "\U0000EBDB" # lightning, lightning-rainy
+#     - "\U0000F61F" # pouring
+#     - "\U0000F61E" # rainy
+#     - "\U0000F61C" # snowy
+#     - "\U0000F61D" # snowy-rainy
+#     - "\U0000E81A" # sunny
+#     - "\U0000EFD8" # windy, windy-variant
+#     - "\U0000F7F3" # exceptional
+#
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 700
+  #   id: font_clock
+  #   glyphs: "0123456789:"
+  #   size: 70
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 700
+  #   id: font_clock_big
+  #   glyphs: "0123456789:"
+  #   size: 100
+  # - file: "gfonts://Roboto"
+  #   id: font_temp
+  #   size: 28
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 500
+  #   id: font_small
+  #   size: 30
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 500
+  #   id: font_medium
+  #   size: 45
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 300
+  #   id: font_xsmall
+  #   size: 16
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
