@@ -1058,48 +1058,49 @@ font:
     glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
     id: f24
     size: 24
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 500
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f36
-    size: 36
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 500
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f48
-    size: 48
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 500
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f32
-    size: 32
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 500
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f64
-    size: 64
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 800
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f64b
-    size: 64
-  - file:
-      type: gfonts
-      family: Noto Sans Display
-      weight: 800
-    glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
-    id: f55b
-    size: 55
+  # Inactive alternate-layout fonts. Uncomment only when a display lambda uses them.
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f36
+  #   size: 36
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f48
+  #   size: 48
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f32
+  #   size: 32
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 500
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f64
+  #   size: 64
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 800
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f64b
+  #   size: 64
+  # - file:
+  #     type: gfonts
+  #     family: Noto Sans Display
+  #     weight: 800
+  #   glyphs: '&@!,.\"%()+-_:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzåäö/µ³’'
+  #   id: f55b
+  #   size: 55
 
 # ----------------------------------------------------------
 # Unused weather icons — enable when the display lambda draws them.
@@ -1147,41 +1148,41 @@ font:
 #     - "\U0000EFD8" # windy, windy-variant
 #     - "\U0000F7F3" # exceptional
 #
-  - file:
-      type: gfonts
-      family: Open Sans
-      weight: 700
-    id: font_clock
-    glyphs: "0123456789:"
-    size: 70
-  - file:
-      type: gfonts
-      family: Open Sans
-      weight: 700
-    id: font_clock_big
-    glyphs: "0123456789:"
-    size: 100
-  - file: "gfonts://Roboto"
-    id: font_temp
-    size: 28
-  - file:
-      type: gfonts
-      family: Open Sans
-      weight: 500
-    id: font_small
-    size: 30
-    glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
-  - file:
-      type: gfonts
-      family: Open Sans
-      weight: 500
-    id: font_medium
-    size: 45
-    glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
-  - file:
-      type: gfonts
-      family: Open Sans
-      weight: 300
-    id: font_xsmall
-    size: 16
-    glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 700
+  #   id: font_clock
+  #   glyphs: "0123456789:"
+  #   size: 70
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 700
+  #   id: font_clock_big
+  #   glyphs: "0123456789:"
+  #   size: 100
+  # - file: "gfonts://Roboto"
+  #   id: font_temp
+  #   size: 28
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 500
+  #   id: font_small
+  #   size: 30
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 500
+  #   id: font_medium
+  #   size: 45
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
+  # - file:
+  #     type: gfonts
+  #     family: Open Sans
+  #     weight: 300
+  #   id: font_xsmall
+  #   size: 16
+  #   glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz»'
