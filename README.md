@@ -10,19 +10,18 @@ This example goes beyond a USB-only plug-and-flash config: it latches the batter
 
 Photo of a unit running this config (e-ink layout with battery % on the bottom bar). Replace [`images/display.jpg`](images/display.jpg) anytime — see [`images/README.md`](images/README.md). Optional wider hardware-only shot: `images/device.jpg`.
 
-> **Status:** Repository is private while the config is polished. It will be made public when ready. A follow-up PR to [devices.esphome.io](https://devices.esphome.io/devices/m5stack-airq/) is planned after that (catalog page uses a separate, validator-friendly `config.yaml` layout).
-
 ## Requirements
 
 - M5Stack AirQ hardware
-- ESPHome (tested with recent 2026.x / ESP-IDF on ESP32-S3, `flash_size: 8MB`)
+- ESPHome `2026.7.4` / ESP-IDF on ESP32-S3, `flash_size: 8MB`
 - Home Assistant (native API) recommended for time sync and entities
 
 ## Quick start
 
-1. Copy `secrets.yaml.example` → `secrets.yaml` and set Wi‑Fi, API encryption key, and OTA password.
+1. Copy `secrets.yaml.example` → `secrets.yaml` and set Wi-Fi, API encryption key, OTA password, and a strong fallback-hotspot password.
 2. Edit substitutions in `airq.yaml` (`devicename`, `location`, `fallback_timezone`, `clock_hours`, `display_temperature_scale`, battery thresholds, etc.).
-3. Compile and flash (USB serial for first install; OTA afterward):
+3. For the first USB flash, power off the AirQ, hold Button A (`G0`), then connect USB. Release the button after power is applied to enter download mode. See M5Stack's [download-mode instructions](https://docs.m5stack.com/en/arduino/m5air_quality/program).
+4. Compile and flash (USB serial for first install; OTA afterward):
 
 ```bash
 esphome run airq.yaml
@@ -58,13 +57,14 @@ wifi_ssid: "..."
 wifi_password: "..."
 api_encryption_key: "..."   # ESPHome API encryption key
 ota_password: "..."
+fallback_ap_password: "..." # At least 8 characters; protects the recovery hotspot
 ```
 
 Generate an API key with `esphome wizard` / the ESPHome UI encryption key helper as you prefer.
 
 ## Relationship to devices.esphome.io
 
-The [official device page](https://devices.esphome.io/devices/m5stack-airq/) hosts a catalog-style example. That site’s contribution rules require a secrets-free, hardware-focused `config.yaml` (no `!secret`, limited top-level components). **This repo** is the full, HA-oriented config with battery management. After this repository is public, the plan is to point the device page’s `project-url` here and update the catalog docs (including battery support).
+The [official device page](https://devices.esphome.io/devices/m5stack-airq/) hosts a catalog-style example. That site's contribution rules require a secrets-free, hardware-focused `config.yaml` (no `!secret`, limited top-level components). This repository is the full, Home Assistant-oriented configuration with battery management.
 
 ## License
 

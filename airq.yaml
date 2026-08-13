@@ -133,9 +133,10 @@ wifi:
   # LIGHT usually keeps the HA API stable while cutting radio idle current.
   power_save_mode: LIGHT
 
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  # Password-protected fallback hotspot for recovery when Wi-Fi connection fails.
   ap:
     ssid: "${devicename} Fallback Hotspot"
+    password: !secret fallback_ap_password
 
 captive_portal:
 
