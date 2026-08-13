@@ -19,7 +19,7 @@ Photo of a unit running this config (e-ink layout with battery % on the bottom b
 ## Quick start
 
 1. Copy `secrets.yaml.example` → `secrets.yaml` and set Wi-Fi, API encryption key, OTA password, and a strong fallback-hotspot password.
-2. Edit substitutions in `airq.yaml` (`devicename`, `location`, `fallback_timezone`, `clock_hours`, `display_temperature_scale`, battery thresholds, etc.).
+2. Edit substitutions in `airq.yaml`, especially the unique `devicename` and short `friendlyname`; set `location`, `fallback_timezone`, `clock_hours`, `display_temperature_scale`, and any other defaults you want to override there. [`package/airq.yaml`](package/airq.yaml) provides the defaults; leave it unchanged to keep Git updates simple.
 3. For the first USB flash, power off the AirQ, hold Button A (`G0`), then connect USB. Release the button after power is applied to enter download mode. See M5Stack's [download-mode instructions](https://docs.m5stack.com/en/arduino/m5air_quality/program).
 4. Compile and flash (USB serial for first install; OTA afterward):
 
@@ -44,6 +44,8 @@ Or use the ESPHome dashboard / your usual builder workflow. Point the builder at
 
 See comments at the top of [`airq.yaml`](airq.yaml). Important ones:
 
+- `devicename` — unique hostname for mDNS, OTA, Home Assistant, and the fallback hotspot; use lowercase letters, digits, and hyphens
+- `friendlyname` — short Home Assistant and e-ink display label
 - `fallback_timezone` — IANA zone for SNTP when the HA API is down (default `Etc/UTC`)
 - `clock_hours` — `"24"` or `"12"`
 - `display_temperature_scale` — `"C"` or `"F"` for the e-ink Temp row only (HA temperature entity stays °C)
@@ -63,24 +65,37 @@ fallback_ap_password: "..." # At least 8 characters; protects the recovery hotsp
 Generate an API key with `esphome wizard` / the ESPHome UI encryption key helper as you prefer.
 
 
-## Using as a Home Assistant package
+## Clone-and-run vs Git package
 
-You can pull this YAML from an overlay so a live install keeps its own substitutions. ESPHome resolves `!secret` keys in the package **before** overlay merges, so `secrets.yaml` must still define the names in `secrets.yaml.example` (`api_encryption_key`, `ota_password`, `fallback_ap_password`). Alias those to existing device-specific keys if needed.
+**Local / standalone:** this directory is a complete example. Copy `secrets.yaml.example` → `secrets.yaml`, edit substitutions in [`airq.yaml`](airq.yaml), and compile that wrapper. [`package/airq.yaml`](package/airq.yaml) is pulled in locally; ESPHome does not need GitHub at flash time.
+
+**Remote package:** [ESPHome remote packages cannot contain secret lookups](https://esphome.io/components/packages.html). Point `packages:` at `package/airq.yaml` and pass credentials as substitutions from *your* `secrets.yaml` (any key names you already use):
 
 ```yaml
-packages:
-  airq:
-    url: https://github.com/shomanjk/esphome-m5stack-airq
-    ref: main
-    files: [airq.yaml]
-    refresh: 1d
-
 substitutions:
+  # Must be unique on your network; use lowercase letters, digits, and hyphens.
+  devicename: airq-living-room
+  # Keep this short: it is shown on the e-ink display.
+  friendlyname: AirQ LR
   location: Living Room
   fallback_timezone: "Etc/UTC"
   clock_hours: "12"
   display_temperature_scale: "F"
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+  api_encryption_key: !secret api_encryption_key
+  ota_password: !secret ota_password
+  fallback_ap_password: !secret fallback_ap_password
+
+packages:
+  airq:
+    url: https://github.com/shomanjk/esphome-m5stack-airq
+    ref: main
+    files: [package/airq.yaml]
+    refresh: 1d
 ```
+
+Pin `ref` to a tag or commit if you do not want to track `main`. `refresh: 1d` caches the clone for a day; use `0s` while testing a moving branch.
 
 ## Relationship to devices.esphome.io
 
