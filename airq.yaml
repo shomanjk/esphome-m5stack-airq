@@ -15,7 +15,7 @@
 #    Gauge is a piecewise LiPo curve from battery_empty_voltage–4.2 V → 0–100%. Shutdown uses voltage
 #    (battery_shutdown_voltage), not %, so display calibration and protection stay independent.
 # 7. battery_shutdown_voltage: 0 = disabled; else when pack V stays at/below this after warm-up, HOLD is
-#    released to power off (USB can still run the board). Tuned under load (~33 mA USB/full profile).
+#    released to power off (USB can still run the board). Cutoff is under-load pack voltage (resting V recovers higher).
 # 8. display_temperature_scale: "C" or "F" — e-ink Temp row only. Temperature API entity and offsets stay °C.
 # 9. Battery saver: WiFi power_save HIGH, no web_server, SCD4x low_power_periodic, SEN55 PM bursts.
 #    HIGH is the most aggressive modem sleep; fall back to LIGHT if the HA API drops on your AP.
@@ -421,7 +421,7 @@ interval:
             lambda: return id(power_profile_ready);
           then:
             - script.execute: apply_power_profile
-  # Item 5: periodic battery summary for HA logs / validation vs ~33 mA full-profile baseline.
+  # Periodic battery summary for HA logs.
   - interval: 10min
     then:
       - if:
@@ -515,8 +515,7 @@ sensor:
     on_value:
       - lambda: |-
           // Battery voltage rate (mV/h): positive = charging (V rising), negative = discharging.
-          // Compare USB vs battery runs against the prior ~33 mA full-profile baseline
-          // (steeper |mV/h| under same SoC when discharging hard).
+          // Steeper |mV/h| at the same SoC means a harder discharge.
           if (!isnan(x)) {
             const uint32_t now = millis();
             if (!isnan(id(batt_v_prev)) && id(batt_v_prev_ms) > 0 && now > id(batt_v_prev_ms)) {
