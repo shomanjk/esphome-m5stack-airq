@@ -65,7 +65,7 @@ Generate an API key with `esphome wizard` / the ESPHome UI encryption key helper
 
 ## Using as a Home Assistant package
 
-This file is also meant to be pulled from an ESPHome overlay so a live install can keep its own hostname, substitutions, and secret names:
+You can pull this YAML from an overlay so a live install keeps its own substitutions. ESPHome resolves `!secret` keys in the package **before** overlay merges, so `secrets.yaml` must still define the names in `secrets.yaml.example` (`api_encryption_key`, `ota_password`, `fallback_ap_password`). Alias those to existing device-specific keys if needed.
 
 ```yaml
 packages:
@@ -80,12 +80,7 @@ substitutions:
   fallback_timezone: "Etc/UTC"
   clock_hours: "12"
   display_temperature_scale: "F"
-  api_encryption_secret: airq_api_encryption_key
-  ota_password_secret: airq_ota_password
-  fallback_ap_password_secret: airq_ap_password
 ```
-
-Override `api_encryption_secret` / `ota_password_secret` / `fallback_ap_password_secret` to match keys already in that install's `secrets.yaml`. Standalone flashes can keep the defaults and copy `secrets.yaml.example`.
 
 ## Relationship to devices.esphome.io
 
