@@ -39,6 +39,7 @@ Or use the ESPHome dashboard / your usual builder workflow. Point the builder at
 | Power mode select | Auto / Max / Eco — Auto uses pack V + voltage-rate hysteresis |
 | Battery saver | Wi‑Fi `HIGH` (fall back to `LIGHT` if HA disconnects), no `web_server`, SCD4x `low_power_periodic`, SEN55 PM bursts |
 | Display | Warm-up screen, SCD40 / SEN55 layout, clock (HA time with SNTP fallback) |
+| Buzzer (`GPIO9`) | Onboard passive buzzer with a disabled-by-default `Test Buzzer` button and `play_buzzer_alert` API action |
 
 ## Substitutions (high level)
 
