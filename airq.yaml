@@ -4,11 +4,15 @@
 # This file supplies credentials from secrets.yaml and is what you compile locally.
 #
 # 1. Copy secrets.yaml.example → secrets.yaml and fill in wifi / API / OTA / fallback AP.
-# 2. Adjust substitutions below (location, timezone, clock, display temp scale, …).
+# 2. Adjust substitutions below (device name, location, timezone, clock, display temp scale, …).
 # 3. First USB flash: power off, hold Button A (G0), connect USB, then release.
 # 4. esphome run airq.yaml  (or your ESPHome dashboard, pointed at this directory)
 
 substitutions:
+  # Must be unique on your network; use lowercase letters, digits, and hyphens.
+  devicename: airq
+  # Keep this short: it is shown on the e-ink display.
+  friendlyname: AirQ
   location: Living Room
   fallback_timezone: "Etc/UTC"
   clock_hours: "24"

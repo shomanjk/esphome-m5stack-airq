@@ -19,7 +19,7 @@ Photo of a unit running this config (e-ink layout with battery % on the bottom b
 ## Quick start
 
 1. Copy `secrets.yaml.example` → `secrets.yaml` and set Wi-Fi, API encryption key, OTA password, and a strong fallback-hotspot password.
-2. Edit substitutions in `airq.yaml` (`location`, `fallback_timezone`, `clock_hours`, `display_temperature_scale`, …). Battery thresholds and other defaults live in [`package/airq.yaml`](package/airq.yaml).
+2. Edit substitutions in `airq.yaml`, especially the unique `devicename` and short `friendlyname`; then set `location`, `fallback_timezone`, `clock_hours`, `display_temperature_scale`, and any other defaults you want to change in [`package/airq.yaml`](package/airq.yaml).
 3. For the first USB flash, power off the AirQ, hold Button A (`G0`), then connect USB. Release the button after power is applied to enter download mode. See M5Stack's [download-mode instructions](https://docs.m5stack.com/en/arduino/m5air_quality/program).
 4. Compile and flash (USB serial for first install; OTA afterward):
 
@@ -71,6 +71,10 @@ Generate an API key with `esphome wizard` / the ESPHome UI encryption key helper
 
 ```yaml
 substitutions:
+  # Must be unique on your network; use lowercase letters, digits, and hyphens.
+  devicename: airq-living-room
+  # Keep this short: it is shown on the e-ink display.
+  friendlyname: AirQ LR
   location: Living Room
   fallback_timezone: "Etc/UTC"
   clock_hours: "12"
